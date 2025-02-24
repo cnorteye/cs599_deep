@@ -1,0 +1,219 @@
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import numpy as np
+import random
+
+# Set random seed based on name
+def name_to_seed_sum(name):
+    return sum(ord(char) for char in name)
+
+first_name = "Comfort"
+seed_value = name_to_seed_sum(first_name)
+
+tf.random.set_seed(seed_value)
+np.random.seed(seed_value)
+random.seed(seed_value)
+
+# Define possible noise types
+NOISE_TYPES = ["gaussian", "uniform", "salt_pepper", "laplace"]
+
+
+# Function to add different types of noise
+def add_noise(data, noise_level, noise_type):
+    if noise_type == "gaussian":
+        return data + tf.random.normal(shape=tf.shape(data), mean=0.0, stddev=noise_level)
+    elif noise_type == "uniform":
+        return data + tf.random.uniform(shape=tf.shape(data), minval=-noise_level, maxval=noise_level)
+    elif noise_type == "laplace":
+        return data + tf.convert_to_tensor(np.random.laplace(loc=0.0, scale=noise_level, size=data.shape), dtype=tf.float32)
+    elif noise_type == "salt_pepper":
+        salt_pepper_noise = tf.random.uniform(tf.shape(data), minval=0, maxval=1)
+        salt_mask = tf.cast(salt_pepper_noise < noise_level / 2, tf.float32)
+        pepper_mask = tf.cast(salt_pepper_noise > 1 - (noise_level / 2), tf.float32)
+        return data * (1 - salt_mask - pepper_mask) + salt_mask - pepper_mask
+    else:
+        return data  # Default to no noise if the type is unknown
+
+
+
+# Define Loss Functions
+def squared_loss(y, y_predicted):
+    return tf.reduce_mean(tf.square(y - y_predicted))
+
+def absolute_loss(y, y_predicted):
+    return tf.reduce_mean(tf.abs(y - y_predicted))
+
+def huber_loss(y, y_predicted, delta=1.0):
+    residual = tf.abs(y - y_predicted)
+    condition = tf.less(residual, delta)
+    return tf.reduce_mean(
+        tf.where(condition, 0.5 * tf.square(residual), delta * (residual - 0.5 * delta))
+    )
+
+def hybrid_loss(y, y_predicted, alpha=0.5):
+    return alpha * absolute_loss(y, y_predicted) + (1 - alpha) * squared_loss(y, y_predicted)
+
+# Experiment Runner Function
+def run_experiment(loss_type, learning_rate, num_steps, noise_level, noise_type, use_patience):
+  # Generate dataset
+    NUM_EXAMPLES = 500
+    X = tf.random.normal([NUM_EXAMPLES])
+    noise = tf.random.normal([NUM_EXAMPLES])
+    y = X * 3 + 2   # True ouputs
+
+    # Apply noise to the dataset
+    y_noisy = add_noise(y, noise_level, noise_type)
+
+    # Initialize model parameters
+    W = tf.Variable(0.0, dtype=tf.float32, trainable=True)
+    b = tf.Variable(0.0, dtype=tf.float32, trainable=True)
+
+    # Define optimizer
+    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+
+    # Define prediction function
+    def prediction(x):
+        return W * x + b
+
+    # Training loop
+    best_loss = float('inf')
+    patience_counter = 0
+    patience_threshold = 200 if use_patience else float('inf')
+    losses = []
+
+    for i in range(num_steps):
+        with tf.GradientTape() as tape:
+            yhat = prediction(X) + tf.random.normal([NUM_EXAMPLES], stddev=noise_level)  # Adding noise dynamically
+            if loss_type == "MSE":
+                loss = squared_loss(y, yhat)
+            elif loss_type == "MAE":
+                loss = absolute_loss(y, yhat)
+            elif loss_type == "Huber":
+                loss = huber_loss(y, yhat)
+            elif loss_type == "Hybrid":
+                loss = hybrid_loss(y, yhat)
+            else:
+                raise ValueError("Invalid loss function")
+
+        # Compute gradients
+        grads = tape.gradient(loss, [W, b])
+        if grads[0] is None or grads[1] is None:
+            print(f"Warning: No gradients at step {i}. Skipping update.")
+            continue
+
+        optimizer.apply_gradients(zip(grads, [W, b]))
+
+        # Track loss
+        current_loss = loss.numpy()
+        losses.append(current_loss)
+
+        # Patience scheduling (manual learning rate adjustment)
+        if current_loss < best_loss:
+            best_loss = current_loss
+            patience_counter = 0
+        else:
+            patience_counter += 1
+
+        if patience_counter >= patience_threshold:
+            new_lr = optimizer.learning_rate.numpy() * 0.9  # Reduce LR by 10%
+            optimizer.learning_rate.assign(new_lr)
+            print(f"Reducing learning rate to {new_lr:.6f} at step {i}")
+            patience_counter = 0
+
+        # Print progress every 500 steps
+        if i % 500 == 0:
+            print(f"Step {i}, Loss: {current_loss:.4f}, W: {W.numpy():.4f}, b: {b.numpy():.4f}")
+
+    print(f"Final Model: W = {W.numpy():.4f}, b = {b.numpy():.4f}, Final Loss: {loss.numpy():.4f}")
+
+    # Plot loss curve
+    plt.plot(losses, label=f'{loss_type}')
+    plt.xlabel('Training Steps')
+    plt.ylabel('Loss')
+    plt.title(f'Loss Curve ({loss_type})')
+    plt.legend()
+    plt.show()
+
+    return W.numpy(), b.numpy(), loss.numpy()
+
+# Experiment Configurations
+experiment_configs = [
+    {"loss_type": "MSE", "learning_rate": 0.001, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "MSE", "learning_rate": 0.001, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "MSE", "learning_rate": 0.001, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "MSE", "learning_rate": 0.001, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+    {"loss_type": "MSE", "learning_rate": 0.005, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "MSE", "learning_rate": 0.005, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "MSE", "learning_rate": 0.005, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "MSE", "learning_rate": 0.005, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+    {"loss_type": "MSE", "learning_rate": 0.01, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "MSE", "learning_rate": 0.005, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "MSE", "learning_rate": 0.01, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "MSE", "learning_rate": 0.01, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+    {"loss_type": "MSE", "learning_rate": 0.05, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "MSE", "learning_rate": 0.05, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "MSE", "learning_rate": 0.05, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "MSE", "learning_rate": 0.05, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+
+    {"loss_type": "MAE", "learning_rate": 0.001, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "MAE", "learning_rate": 0.001, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "MAE", "learning_rate": 0.001, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "MAE", "learning_rate": 0.001, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+    {"loss_type": "MAE", "learning_rate": 0.005, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "MAE", "learning_rate": 0.005, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "MAE", "learning_rate": 0.005, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "MAE", "learning_rate": 0.005, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+    {"loss_type": "MAE", "learning_rate": 0.01, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "MAE", "learning_rate": 0.005, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "MAE", "learning_rate": 0.01, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "MAE", "learning_rate": 0.01, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+    {"loss_type": "MAE", "learning_rate": 0.05, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "MAE", "learning_rate": 0.05, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "MAE", "learning_rate": 0.05, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "MAE", "learning_rate": 0.05, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+
+    {"loss_type": "Huber", "learning_rate": 0.001, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "Huber", "learning_rate": 0.001, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "Huber", "learning_rate": 0.001, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "Huber", "learning_rate": 0.001, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+    {"loss_type": "Huber", "learning_rate": 0.005, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "Huber", "learning_rate": 0.005, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "Huber", "learning_rate": 0.005, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "Huber", "learning_rate": 0.005, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+    {"loss_type": "Huber", "learning_rate": 0.01, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "Huber", "learning_rate": 0.005, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "Huber", "learning_rate": 0.01, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "Huber", "learning_rate": 0.01, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+    {"loss_type": "Huber", "learning_rate": 0.05, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "Huber", "learning_rate": 0.05, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "Huber", "learning_rate": 0.05, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "Huber", "learning_rate": 0.05, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+
+    {"loss_type": "Hybrid", "learning_rate": 0.001, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "Hybrid", "learning_rate": 0.001, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "Hybrid", "learning_rate": 0.001, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "Hybrid", "learning_rate": 0.001, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+    {"loss_type": "Hybrid", "learning_rate": 0.005, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "Hybrid", "learning_rate": 0.005, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "Hybrid", "learning_rate": 0.005, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "Hybrid", "learning_rate": 0.005, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+    {"loss_type": "Hybrid", "learning_rate": 0.01, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "Hybrid", "learning_rate": 0.005, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "Hybrid", "learning_rate": 0.01, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "Hybrid", "learning_rate": 0.01, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+    {"loss_type": "Hybrid", "learning_rate": 0.05, "num_steps": 1000, "noise_level": 0.1, "noise_type": "gaussian", "use_patience": False},
+    {"loss_type": "Hybrid", "learning_rate": 0.05, "num_steps": 2500, "noise_level": 0.5, "noise_type": "uniform", "use_patience": False},
+    {"loss_type": "Hybrid", "learning_rate": 0.05, "num_steps": 3000, "noise_level": 1.0, "noise_type": "salt_pepper", "use_patience": True},
+    {"loss_type": "Hybrid", "learning_rate": 0.05, "num_steps": 3500, "noise_level": 2.0, "noise_type": "laplace", "use_patience": True},
+]
+
+# Run all experiments
+results = []
+for config in experiment_configs:
+    W_final, b_final, final_loss = run_experiment(**config)
+    results.append((config["loss_type"], config["learning_rate"], config["num_steps"], config["noise_type"], W_final, b_final, final_loss))
+
+# Display results
+print("\nExperiment Results:")
+for res in results:
+  print(f"Loss: {res[0]}, LR: {res[1]}, Steps: {res[2]}, Noise: {res[3]}, W: {res[4]:.4f}, b: {res[5]:.4f}, Final Loss: {res[6]:.4f}")
